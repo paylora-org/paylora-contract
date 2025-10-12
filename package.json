@@ -1,0 +1,26 @@
+{
+  "name": "paylora-contract",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "hardhat test",
+    "compile": "hardhat compile",
+    "deploy:arb": "hardhat run scripts/deploy.js --network arbSepolia",
+    "deploy:arb-mainnet": "hardhat run scripts/deploy.js --network arbitrum"
+  },
+  "keywords": [],
+  "author": "Bondarenko Andrii",
+  "license": "MIT",
+  "description": "",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^17.2.3",
+    "hardhat": "^2.22.19"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.4.0",
+    "@openzeppelin/contracts-upgradeable": "^5.4.0",
+    "@openzeppelin/hardhat-upgrades": "^3.9.1"
+  }
+}
