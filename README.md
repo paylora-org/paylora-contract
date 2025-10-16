@@ -89,15 +89,15 @@ Verification for a proxy is a two-step process:
 
 ## ⚙️ Core Contract Functions
 ### For Users (Payers)
-*   `payInvoiceETH(bytes32 invoiceId, bytes32 merchantId, uint256 amount)`: Pays an invoice using the network's native currency (ETH).
-*   `payInvoiceERC20(bytes32 invoiceId, bytes32 merchantId, uint256 amount, address token)`: Pays an invoice using a whitelisted ERC20 token.
+*   `payInvoiceETH(bytes32 invoiceId, bytes32 merchantId, uint256 amount, bytes calldata signature)`: Pays an invoice using the network's native currency (ETH).
+*   `payInvoiceERC20(bytes32 invoiceId, bytes32 merchantId, uint256 amount, address token, bytes calldata signature)`: Pays an invoice using a whitelisted ERC20 token.
 
 ### For the Contract Owner
 These functions can only be called by the owner (which should be a Timelock contract for production).
 
 *   `pause() / unpause()`: Pauses or unpauses all payment functions.
 *   `setFee(uint256 newFeeBps)`: Updates the platform's service fee.
-*   `addMerchant(bytes32 merchantId, address walletAddress)`: Adds a new merchant and activates them.
+*   `addMerchant(bytes32 merchantId, address walletAddress, address signerAddress)`: Adds a new merchant and activates them.
 *   `removeMerchant(bytes32 merchantId)`: Deletes a merchant from the system.
 *   `updateMerchantWallet(bytes32 merchantId, address newWalletAddress)`: Updates the receiving wallet for a merchant.
 *   `setTokenWhitelist(address token, bool isWhitelisted)`: Adds or removes an ERC20 token from the payment whitelist.
