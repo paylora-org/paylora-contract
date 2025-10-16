@@ -6,8 +6,11 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 
 /// @title Paylora InvoiceProcessor (Upgradeable)
@@ -20,18 +23,22 @@ contract InvoiceProcessor is
     UUPSUpgradeable 
 {
    using SafeERC20 for IERC20;
+   using ECDSA for bytes32;
+   using MessageHashUtils for bytes32;
 
     // --- Constants ---
     uint256 public constant MAX_BPS = 10_000;
-
-    // --- State ---
     uint256 public platformFeeBps;
-    mapping(bytes32 => address) public merchants;
+    struct Merchant {
+        address walletAddress;
+        address signerAddress;
+    }
+    mapping(bytes32 => Merchant) public merchants;
     mapping(bytes32 => bool) private processedInvoice;
     mapping(address => bool) public whitelistedTokens;
 
     event InvoicePaid(bytes32 indexed invoiceId, bytes32 indexed merchantId, address indexed client, uint256 amount, uint256 feeAmount, address token);
-    event MerchantAdded(bytes32 indexed merchantId, address walletAddress);
+    event MerchantAdded(bytes32 indexed merchantId, address walletAddress, address signerAddress);
     event MerchantRemoved(bytes32 indexed merchantId);
     event MerchantWalletUpdated(bytes32 indexed merchantId, address newWalletAddress);
     event TokenWhitelistUpdated(address indexed token, bool isWhitelisted);
@@ -67,26 +74,39 @@ contract InvoiceProcessor is
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     modifier onlyActiveMerchant(bytes32 merchantId) {
-        if (merchants[merchantId] == address(0)) revert InvoiceProcessor__MerchantNotActive();
+        if (merchants[merchantId].walletAddress == address(0)) revert InvoiceProcessor__MerchantNotActive();
         _;
     }
 
-    function payInvoiceETH(bytes32 invoiceId, bytes32 merchantId, uint256 amount)
-        external payable whenNotPaused nonReentrant onlyActiveMerchant(merchantId) {
-        _processPayment(invoiceId, merchantId, amount, address(0));
+    function _verifySignature(bytes32 invoiceId, bytes32 merchantId, uint256 amount, address token, bytes calldata signature) internal view {
+        address signerAddress = merchants[merchantId].signerAddress;
+        require(signerAddress != address(0), "Signer not set for merchant");
+
+        bytes32 messageHash = keccak256(abi.encodePacked(invoiceId, amount, token, merchantId, address(this), block.chainid));
+        address recoveredSigner = messageHash.toEthSignedMessageHash().recover(signature);
+
+        require(recoveredSigner != address(0), "ECDSA: invalid signature");
+        require(recoveredSigner == signerAddress, "Invalid signature");
     }
 
-    function payInvoiceERC20(bytes32 invoiceId, bytes32 merchantId, uint256 amount, address token)
+    function payInvoiceETH(bytes32 invoiceId, bytes32 merchantId, uint256 amount, bytes calldata signature)
+        external payable whenNotPaused nonReentrant onlyActiveMerchant(merchantId) {
+        _processPayment(invoiceId, merchantId, amount, address(0), signature);
+    }
+
+    function payInvoiceERC20(bytes32 invoiceId, bytes32 merchantId, uint256 amount, address token, bytes calldata signature)
         external whenNotPaused nonReentrant onlyActiveMerchant(merchantId) {
         if (!whitelistedTokens[token]) revert InvoiceProcessor__TokenNotWhitelisted();
-        _processPayment(invoiceId, merchantId, amount, token);
+        _processPayment(invoiceId, merchantId, amount, token, signature);
     }
 
-    function _processPayment(bytes32 invoiceId, bytes32 merchantId, uint256 amount, address token) internal {
+    function _processPayment(bytes32 invoiceId, bytes32 merchantId, uint256 amount, address token, bytes calldata signature) internal {
+        _verifySignature(invoiceId, merchantId, amount, token, signature);
         if (processedInvoice[invoiceId]) revert InvoiceProcessor__InvoiceAlreadyProcessed();
         processedInvoice[invoiceId] = true;
+        
         address client = msg.sender;
-        address merchantWallet = merchants[merchantId];
+        address merchantWallet = merchants[merchantId].walletAddress;
         uint256 feeAmount = (amount * platformFeeBps) / MAX_BPS;
         uint256 merchantAmount = amount - feeAmount;
 
@@ -126,23 +146,24 @@ contract InvoiceProcessor is
         emit FeeUpdated(_newFeeBps);
     }
     
-    function addMerchant(bytes32 merchantId, address walletAddress) external onlyOwner {
-        if (merchants[merchantId] != address(0)) revert InvoiceProcessor__MerchantAlreadyExists();
+    function addMerchant(bytes32 merchantId, address walletAddress, address signerAddress) external onlyOwner {
+        if (merchants[merchantId].walletAddress != address(0)) revert InvoiceProcessor__MerchantAlreadyExists();
         if (walletAddress == address(0)) revert InvoiceProcessor__ZeroAddress();
-        merchants[merchantId] = walletAddress;
-        emit MerchantAdded(merchantId, walletAddress);
+        merchants[merchantId].walletAddress = walletAddress;
+        merchants[merchantId].signerAddress = signerAddress;
+        emit MerchantAdded(merchantId, walletAddress, signerAddress);
     }
 
     function removeMerchant(bytes32 merchantId) external onlyOwner {
-        if (merchants[merchantId] == address(0)) revert InvoiceProcessor__MerchantNotFound();
+        if (merchants[merchantId].walletAddress == address(0)) revert InvoiceProcessor__MerchantNotFound();
         delete merchants[merchantId];
         emit MerchantRemoved(merchantId);
     }
 
     function updateMerchantWallet(bytes32 merchantId, address newWalletAddress) external onlyOwner {
-        if (merchants[merchantId] == address(0)) revert InvoiceProcessor__MerchantNotFound();
+        if (merchants[merchantId].walletAddress == address(0)) revert InvoiceProcessor__MerchantNotFound();
         if (newWalletAddress == address(0)) revert InvoiceProcessor__ZeroAddress();
-        merchants[merchantId] = newWalletAddress;
+        merchants[merchantId].walletAddress = newWalletAddress;
         emit MerchantWalletUpdated(merchantId, newWalletAddress);
     }
     

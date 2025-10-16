@@ -65,9 +65,7 @@ async function main() {
   );
   await contractProxy.waitForDeployment();
   const contractAddress = await contractProxy.getAddress();
-  const implementationAddress = await hre.upgrades.getImplementationAddress(proxyAddress);
   console.log("✅ InvoiceProcessor proxy deployed to:", contractAddress);
-  console.log("✅ Implementation Address (Use this for verification):", implementationAddress);
 
 }
 

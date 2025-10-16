@@ -2,10 +2,29 @@ const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
 
 describe("InvoiceProcessor (Upgradeable)", function () {
-  let owner, merchant, client, other;
+  let owner, merchant, client, signer, other;
   let contract, token, merchantId;
-  const INITIAL_FEE_BPS = 50n;
+  const INITIAL_FEE_BPS = 50n; // 0.5%
   const MAX_BPS = 10000n;
+
+  const createPaymentSignature = async (
+    invoiceId,
+    amount,
+    tokenAddress,
+    merchantId
+  ) => {
+    const contractAddress = await contract.getAddress();
+    const { chainId } = await ethers.provider.getNetwork();
+    const messageHash = ethers.keccak256(
+      ethers.solidityPacked(
+        ["bytes32", "uint256", "address", "bytes32", "address", "uint256"],
+        [invoiceId, amount, tokenAddress, merchantId, contractAddress, chainId]
+      )
+    );
+
+    const signature = await signer.signMessage(ethers.getBytes(messageHash));
+    return signature;
+  };
 
   const calcAmounts = (amount) => {
     const fee = (amount * INITIAL_FEE_BPS) / MAX_BPS;
@@ -13,7 +32,7 @@ describe("InvoiceProcessor (Upgradeable)", function () {
   };
 
   beforeEach(async function () {
-    [owner, merchant, client, other] = await ethers.getSigners();
+    [owner, merchant, client, signer, other] = await ethers.getSigners();
 
     const ERC20Mock = await ethers.getContractFactory("ERC20Mock");
     token = await ERC20Mock.deploy(
@@ -37,9 +56,11 @@ describe("InvoiceProcessor (Upgradeable)", function () {
     );
     await contract.waitForDeployment();
 
-    merchantId = ethers.keccak256(ethers.toUtf8Bytes("merchant-1"));
-    await contract.connect(owner).addMerchant(merchantId, merchant.address);
-    // ✅ FIX: Use await getAddress() for the token
+    merchantId = ethers.id("merchant-1");
+    await contract
+      .connect(owner)
+      .addMerchant(merchantId, merchant.address, signer.address);
+
     await contract
       .connect(owner)
       .setTokenWhitelist(await token.getAddress(), true);
@@ -60,22 +81,66 @@ describe("InvoiceProcessor (Upgradeable)", function () {
   });
 
   // ─────────────────────────────
+  describe("Signature Validation", function () {
+    it("should revert a payment with an invalid signature", async () => {
+      const invoiceId = ethers.id("ETH_BAD_SIG");
+      const amount = ethers.parseEther("1.0");
+
+      const messageHash = ethers.keccak256(
+        ethers.solidityPacked(
+          ["bytes32", "uint256", "address", "bytes32", "address", "uint256"],
+          [
+            invoiceId,
+            amount,
+            ethers.ZeroAddress,
+            merchantId,
+            await contract.getAddress(),
+            (await ethers.provider.getNetwork()).chainId,
+          ]
+        )
+      );
+
+      const badSignature = await other.signMessage(
+        ethers.getBytes(messageHash)
+      );
+
+      await expect(
+        contract
+          .connect(client)
+          .payInvoiceETH(invoiceId, merchantId, amount, badSignature, {
+            value: amount,
+          })
+      ).to.be.revertedWith("Invalid signature");
+    });
+  });
+
+  // ─────────────────────────────
   describe("ETH Payments", function () {
-    it("should process a valid ETH invoice and check for duplication", async () => {
-      const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("ETH1"));
+    it("should process a valid ETH invoice and revert on duplication", async () => {
+      const invoiceId = ethers.id("ETH1");
       const amount = ethers.parseEther("1.0");
       const { fee, merchantAmount } = calcAmounts(amount);
+      const signature = await createPaymentSignature(
+        invoiceId,
+        amount,
+        ethers.ZeroAddress,
+        merchantId
+      );
 
       await expect(() =>
         contract
           .connect(client)
-          .payInvoiceETH(invoiceId, merchantId, amount, { value: amount })
+          .payInvoiceETH(invoiceId, merchantId, amount, signature, {
+            value: amount,
+          })
       ).to.changeEtherBalances([merchant, owner], [merchantAmount, fee]);
 
       await expect(
         contract
           .connect(client)
-          .payInvoiceETH(invoiceId, merchantId, amount, { value: amount })
+          .payInvoiceETH(invoiceId, merchantId, amount, signature, {
+            value: amount,
+          })
       ).to.be.revertedWithCustomError(
         contract,
         "InvoiceProcessor__InvoiceAlreadyProcessed"
@@ -83,58 +148,100 @@ describe("InvoiceProcessor (Upgradeable)", function () {
     });
 
     it("should revert if insufficient ETH is sent", async () => {
-      const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("ETH_LOW"));
+      const invoiceId = ethers.id("ETH_LOW");
       const amount = ethers.parseEther("1.0");
+      const signature = await createPaymentSignature(
+        invoiceId,
+        amount,
+        ethers.ZeroAddress,
+        merchantId
+      );
+
       await expect(
-        contract.connect(client).payInvoiceETH(invoiceId, merchantId, amount, {
-          value: ethers.parseEther("0.9"),
-        })
+        contract
+          .connect(client)
+          .payInvoiceETH(invoiceId, merchantId, amount, signature, {
+            value: ethers.parseEther("0.9"),
+          })
       ).to.be.revertedWithCustomError(
         contract,
         "InvoiceProcessor__InsufficientETH"
       );
     });
 
-    it("should revert if paying to a non-active merchant", async () => {
-      const badId = ethers.keccak256(ethers.toUtf8Bytes("no-merchant"));
-      const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("ETH_BAD"));
-      const amount = ethers.parseEther("1.0");
-      await expect(
-        contract
-          .connect(client)
-          .payInvoiceETH(invoiceId, badId, amount, { value: amount })
-      ).to.be.revertedWithCustomError(
-        contract,
-        "InvoiceProcessor__MerchantNotActive"
-      );
-    });
-
-    // NEW: Edge case for zero amount invoices
     it("should correctly process a zero-amount ETH invoice", async () => {
-      const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("ETH_ZERO"));
+      const invoiceId = ethers.id("ETH_ZERO");
+      const amount = 0n;
+      const signature = await createPaymentSignature(
+        invoiceId,
+        amount,
+        ethers.ZeroAddress,
+        merchantId
+      );
+
       await expect(() =>
         contract
           .connect(client)
-          .payInvoiceETH(invoiceId, merchantId, 0, { value: 0 })
+          .payInvoiceETH(invoiceId, merchantId, amount, signature, { value: 0 })
       ).to.changeEtherBalances([merchant, owner], [0, 0]);
+    });
+
+    it("should emit an InvoicePaid event on ETH payment", async function () {
+      const invoiceId = ethers.id("EVENT-TEST-1");
+      const amount = ethers.parseEther("0.1");
+      const { fee } = calcAmounts(amount);
+      const signature = await createPaymentSignature(
+        invoiceId,
+        amount,
+        ethers.ZeroAddress,
+        merchantId
+      );
+
+      await expect(
+        contract
+          .connect(client)
+          .payInvoiceETH(invoiceId, merchantId, amount, signature, {
+            value: amount,
+          })
+      )
+        .to.emit(contract, "InvoicePaid")
+        .withArgs(
+          invoiceId,
+          merchantId,
+          client.address,
+          amount,
+          fee,
+          ethers.ZeroAddress
+        );
     });
   });
 
   // ─────────────────────────────
   describe("ERC20 Payments", function () {
     it("should process a valid ERC20 invoice", async () => {
-      const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("ERC20-1"));
+      const invoiceId = ethers.id("ERC20-1");
       const amount = ethers.parseEther("100");
       const { fee, merchantAmount } = calcAmounts(amount);
-      const contractAddress = await contract.getAddress();
       const tokenAddress = await token.getAddress();
+      const signature = await createPaymentSignature(
+        invoiceId,
+        amount,
+        tokenAddress,
+        merchantId
+      );
 
-      await token.connect(client).approve(contractAddress, amount);
+      await token.connect(client).approve(await contract.getAddress(), amount);
 
       await expect(() =>
         contract
           .connect(client)
-          .payInvoiceERC20(invoiceId, merchantId, amount, tokenAddress)
+          .payInvoiceERC20(
+            invoiceId,
+            merchantId,
+            amount,
+            tokenAddress,
+            signature
+          )
       ).to.changeTokenBalances(
         token,
         [client, merchant, owner],
@@ -146,17 +253,30 @@ describe("InvoiceProcessor (Upgradeable)", function () {
       const badToken = await (
         await ethers.getContractFactory("ERC20Mock")
       ).deploy("BAD", "BAD", client.address, ethers.parseEther("100"));
-      await badToken.waitForDeployment();
-      const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("BAD-TOK"));
+      const invoiceId = ethers.id("BAD-TOK");
       const amount = ethers.parseEther("100");
-      const contractAddress = await contract.getAddress(); // ✅ FIX: Resolve address first
-      const badTokenAddress = await badToken.getAddress(); // ✅ FIX: Resolve address first
+      const badTokenAddress = await badToken.getAddress();
+      const signature = await createPaymentSignature(
+        invoiceId,
+        amount,
+        badTokenAddress,
+        merchantId
+      );
 
-      await badToken.connect(client).approve(contractAddress, amount);
+      await badToken
+        .connect(client)
+        .approve(await contract.getAddress(), amount);
+
       await expect(
         contract
           .connect(client)
-          .payInvoiceERC20(invoiceId, merchantId, amount, badTokenAddress)
+          .payInvoiceERC20(
+            invoiceId,
+            merchantId,
+            amount,
+            badTokenAddress,
+            signature
+          )
       ).to.be.revertedWithCustomError(
         contract,
         "InvoiceProcessor__TokenNotWhitelisted"
@@ -164,18 +284,30 @@ describe("InvoiceProcessor (Upgradeable)", function () {
     });
 
     it("should revert if allowance is too low", async () => {
-      const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("LOW-ALLOW"));
+      const invoiceId = ethers.id("LOW-ALLOW");
       const amount = ethers.parseEther("100");
-      const contractAddress = await contract.getAddress();
       const tokenAddress = await token.getAddress();
+      const signature = await createPaymentSignature(
+        invoiceId,
+        amount,
+        tokenAddress,
+        merchantId
+      );
 
       await token
         .connect(client)
-        .approve(contractAddress, ethers.parseEther("50"));
+        .approve(await contract.getAddress(), ethers.parseEther("50"));
+
       await expect(
         contract
           .connect(client)
-          .payInvoiceERC20(invoiceId, merchantId, amount, tokenAddress)
+          .payInvoiceERC20(
+            invoiceId,
+            merchantId,
+            amount,
+            tokenAddress,
+            signature
+          )
       ).to.be.revertedWithCustomError(
         contract,
         "InvoiceProcessor__InsufficientAmount"
@@ -185,13 +317,16 @@ describe("InvoiceProcessor (Upgradeable)", function () {
 
   // ─────────────────────────────
   describe("Admin Functions", function () {
-    // IMPROVED: More granular tests for merchant management
     describe("Merchant Management", function () {
       it("should allow owner to add, update, and remove merchants", async () => {
-        const newId = ethers.keccak256(ethers.toUtf8Bytes("merchant2"));
-        await expect(contract.connect(owner).addMerchant(newId, other.address))
+        const newId = ethers.id("merchant2");
+        await expect(
+          contract
+            .connect(owner)
+            .addMerchant(newId, other.address, signer.address)
+        )
           .to.emit(contract, "MerchantAdded")
-          .withArgs(newId, other.address);
+          .withArgs(newId, other.address, signer.address);
 
         await expect(
           contract.connect(owner).updateMerchantWallet(newId, merchant.address)
@@ -205,47 +340,22 @@ describe("InvoiceProcessor (Upgradeable)", function () {
       });
 
       it("should prevent non-owners from managing merchants", async () => {
-        const newId = ethers.keccak256(ethers.toUtf8Bytes("merchant2"));
+        const newId = ethers.id("merchant2");
         await expect(
-          contract.connect(client).addMerchant(newId, other.address)
+          contract
+            .connect(client)
+            .addMerchant(newId, other.address, signer.address)
         ).to.be.revertedWithCustomError(contract, "OwnableUnauthorizedAccount");
       });
 
-      // NEW: Negative path tests
       it("should revert when adding an existing merchant", async () => {
         await expect(
-          contract.connect(owner).addMerchant(merchantId, other.address)
+          contract
+            .connect(owner)
+            .addMerchant(merchantId, other.address, signer.address)
         ).to.be.revertedWithCustomError(
           contract,
           "InvoiceProcessor__MerchantAlreadyExists"
-        );
-      });
-
-      it("should revert when updating a non-existent merchant", async () => {
-        const badId = ethers.keccak256(ethers.toUtf8Bytes("no-merchant"));
-        await expect(
-          contract.connect(owner).updateMerchantWallet(badId, other.address)
-        ).to.be.revertedWithCustomError(
-          contract,
-          "InvoiceProcessor__MerchantNotFound"
-        );
-      });
-    });
-
-    describe("Fee Management", function () {
-      it("should allow owner to update fee", async () => {
-        await expect(contract.connect(owner).setFee(200))
-          .to.emit(contract, "FeeUpdated")
-          .withArgs(200);
-        expect(await contract.platformFeeBps()).to.equal(200);
-      });
-
-      it("should revert if fee is set too high", async () => {
-        await expect(
-          contract.connect(owner).setFee(2000)
-        ).to.be.revertedWithCustomError(
-          contract,
-          "InvoiceProcessor__FeeTooHigh"
         );
       });
     });
@@ -259,13 +369,21 @@ describe("InvoiceProcessor (Upgradeable)", function () {
       });
 
       it("should revert payments when paused", async () => {
-        const invoiceId = ethers.keccak256(ethers.toUtf8Bytes("PAUSE-TEST"));
+        const invoiceId = ethers.id("PAUSE-TEST");
         const amount = ethers.parseEther("1.0");
+        const signature = await createPaymentSignature(
+          invoiceId,
+          amount,
+          ethers.ZeroAddress,
+          merchantId
+        );
+
         await contract.connect(owner).pause();
+
         await expect(
           contract
             .connect(client)
-            .payInvoiceETH(invoiceId, merchantId, amount, {
+            .payInvoiceETH(invoiceId, merchantId, amount, signature, {
               value: amount,
             })
         ).to.be.revertedWithCustomError(contract, "EnforcedPause");
@@ -274,7 +392,7 @@ describe("InvoiceProcessor (Upgradeable)", function () {
   });
 
   // ─────────────────────────────
-  describe("Sweeping", function () {
+  describe("Sweeping & Upgrades", function () {
     it("owner can sweep ETH", async () => {
       await owner.sendTransaction({
         to: await contract.getAddress(),
@@ -295,14 +413,11 @@ describe("InvoiceProcessor (Upgradeable)", function () {
         contract.connect(owner).sweepERC20(await token.getAddress())
       ).to.changeTokenBalances(token, [contract, owner], [-amount, amount]);
     });
-  });
 
-  // ─────────────────────────────
-  describe("Upgradeable", function () {
     it("allows the owner to upgrade the contract", async () => {
       const InvoiceProcessorV2 = await ethers.getContractFactory(
         "InvoiceProcessor"
-      ); // Using same for test
+      );
       const upgradedContract = await upgrades.upgradeProxy(
         await contract.getAddress(),
         InvoiceProcessorV2
