@@ -54,6 +54,9 @@ contract InvoiceProcessor is
     error InvoiceProcessor__TransferFailed();
     error InvoiceProcessor__InsufficientETH();
     error InvoiceProcessor__FeeTooHigh();
+    error InvoiceProcessor__SignerNotSet();
+    error InvoiceProcessor__InvalidSignature();
+    error InvoiceProcessor__ECDSAInvalidSignature();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -80,13 +83,13 @@ contract InvoiceProcessor is
 
     function _verifySignature(bytes32 invoiceId, bytes32 merchantId, uint256 amount, address token, bytes calldata signature) internal view {
         address signerAddress = merchants[merchantId].signerAddress;
-        require(signerAddress != address(0), "Signer not set for merchant");
+        if (signerAddress == address(0)) revert InvoiceProcessor__SignerNotSet();
 
         bytes32 messageHash = keccak256(abi.encodePacked(invoiceId, amount, token, merchantId, address(this), block.chainid));
         address recoveredSigner = messageHash.toEthSignedMessageHash().recover(signature);
 
-        require(recoveredSigner != address(0), "ECDSA: invalid signature");
-        require(recoveredSigner == signerAddress, "Invalid signature");
+        if (recoveredSigner == address(0)) revert InvoiceProcessor__ECDSAInvalidSignature();
+        if (recoveredSigner != signerAddress) revert InvoiceProcessor__InvalidSignature();
     }
 
     function payInvoiceETH(bytes32 invoiceId, bytes32 merchantId, uint256 amount, bytes calldata signature)

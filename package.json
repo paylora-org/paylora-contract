@@ -6,6 +6,9 @@
   "scripts": {
     "test": "hardhat test",
     "compile": "hardhat compile",
+    "generate:error-selectors": "hardhat run scripts/generateErrorSelectors.js",
+    "upgrade:arb": "hardhat run scripts/upgrade.js --network arbSepolia",
+    "upgrade:arb-mainnet": "hardhat run scripts/upgrade.js --network arbitrum",
     "deploy:arb": "hardhat run scripts/deploy.js --network arbSepolia",
     "deploy:arb-mainnet": "hardhat run scripts/deploy.js --network arbitrum"
   },
@@ -21,6 +24,7 @@
   "dependencies": {
     "@openzeppelin/contracts": "^5.4.0",
     "@openzeppelin/contracts-upgradeable": "^5.4.0",
-    "@openzeppelin/hardhat-upgrades": "^3.9.1"
+    "@openzeppelin/hardhat-upgrades": "^3.9.1",
+    "ethers": "^6.15.0"
   }
 }
